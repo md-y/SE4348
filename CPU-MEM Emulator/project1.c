@@ -20,6 +20,7 @@
 #define MODE_KERNEL 1
 
 // Struct to hold file descriptors for the two pipes used to communicate between the CPU and Memory processes.
+// Also handles memory reading/writing permissions.
 struct MemoryBus {
     int write_to_mem;
     int read_from_cpu;
@@ -28,6 +29,7 @@ struct MemoryBus {
     unsigned short mode;
 };
 
+// Message format for memory bus messages
 struct MemoryBusMessage {
     unsigned short action;
     unsigned short address;
@@ -40,6 +42,8 @@ void main_memory(struct MemoryBus bus, char *program_path);
 int memory_request(struct MemoryBus bus, unsigned short action, unsigned short address, int value);
 int read_program(char *program_path, int memory[]);
 int get_next_operand(struct MemoryBus bus, int *PC);
+void push_stack(struct MemoryBus bus, int *stack_ptr, int item);
+int pop_stack(struct MemoryBus bus, int *stack_ptr);
 
 /**
  * Entry point for the program. Its only role is to fork the CPU and Memory processes.
@@ -170,8 +174,8 @@ int read_program(char *program_path, int *memory) {
     memory[1000] = 30;
 
     char c;
-    bool address_change = false, new_line = true;
-    int mem_index = 0;
+    bool address_change = false;
+    int mem_index = 0, err = 0;
 
     // Loop through every character until the end of the file
     // The stream will be skip around so this loop is not continuous
@@ -185,24 +189,17 @@ int read_program(char *program_path, int *memory) {
         // Skip any remaining non-digit characters
         if (c < '0' || c > '9') continue;
 
-        // We just read the first character of a number, so we need to go back one
+        // We need to go back one character because we just read the first character of a number
         if (fseek(program_file, -1L, SEEK_CUR) != 0) {
-            fclose(program_file);
-            return -2;
+            err = -2;
+            break;
         }
 
         // This gets the number and skips to the start of the next line
         int num;
         if (fscanf(program_file, "%d%*[^\n]%*[\n]", &num) != 1) {
-            fclose(program_file);
-            return -3;
-        }
-
-        // Detect out-of-bounds address
-        // An invalid address can still be written, but this will stop any uses of it
-        if (mem_index >= MEM_SIZE || mem_index < 0) {
-            fclose(program_file);
-            return -4;
+            err = -3;
+            break;
         }
 
         // Write to memory or change address
@@ -210,13 +207,17 @@ int read_program(char *program_path, int *memory) {
             address_change = false;
             mem_index = num;
         } else {
+            if (mem_index >= MEM_SIZE || mem_index < 0) {
+                err = -4;
+                break;
+            }
             memory[mem_index] = num;
             mem_index++;
         }
     }
 
     fclose(program_file);
-    return 0;
+    return err;
 }
 
 /**
@@ -224,14 +225,14 @@ int read_program(char *program_path, int *memory) {
  */
 void main_cpu(struct MemoryBus bus, int timer_period) {
     int PC = 0,             // Program Counter
-        SP = MEM_SIZE / 2,  // User Stack Pointer
-        SSP = MEM_SIZE,     // System Stack Pointer
-        IR = 0,
-        AC = 0,
-        X = 0,
-        Y = 0,
-        timer_count = 0,
-        operand = 0;
+        SP = MEM_SIZE / 2,  // User Stack Pointer (dec then write)
+        SSP = MEM_SIZE,     // System Stack Pointer (dec then write)
+        IR = 0,             // Instruction register
+        AC = 0,             // Accumulator
+        X = 0,              // Misc register
+        Y = 0,              // Misc register
+        timer_count = 0,    // Causes interrupt when equal to or above timer_period
+        operand = 0;        // Temporary operand holding variable
 
     // TODO: Is SSP fine being separate from SP?
 
@@ -246,6 +247,7 @@ void main_cpu(struct MemoryBus bus, int timer_period) {
     // Seed RNG for instructions that need it
     srand(time(NULL));
 
+    // Loop will only exit when the program calls the Exit instruction
     bool within_interrupt = false;
     for (;;) {
         // Fetch instruction
@@ -384,12 +386,12 @@ void main_cpu(struct MemoryBus bus, int timer_period) {
 
             case 23:  // Call addr
                 operand = get_next_operand(bus, &PC);
-                memory_request(bus, MEM_WRITE, --SP, PC);
+                push_stack(bus, &SP, PC);
                 PC = operand;
                 break;
 
             case 24:  // Ret
-                PC = memory_request(bus, MEM_READ, SP++, MEM_NULL);
+                PC = pop_stack(bus, &SP);
                 PC++;
                 break;
 
@@ -404,27 +406,27 @@ void main_cpu(struct MemoryBus bus, int timer_period) {
                 break;
 
             case 27:  // Push
-                memory_request(bus, MEM_WRITE, --SP, AC);
+                push_stack(bus, &SP, AC);
                 PC++;
                 break;
 
             case 28:  // Pop
-                AC = memory_request(bus, MEM_READ, SP++, MEM_NULL);
+                AC = pop_stack(bus, &SP);
                 PC++;
                 break;
 
             case 29:  // Int (System call)
                 within_interrupt = true;
                 bus.mode = MODE_KERNEL;
-                memory_request(bus, MEM_WRITE, --SSP, PC + 1);
-                memory_request(bus, MEM_WRITE, --SSP, SP);
+                push_stack(bus, &SSP, PC + 1);  // +1 because we don't want to repeat this instruction
+                push_stack(bus, &SSP, SP);
                 SP = SSP;
                 PC = 1500;
                 break;
 
             case 30:  // IRet
-                SP = memory_request(bus, MEM_READ, SSP++, MEM_NULL);
-                PC = memory_request(bus, MEM_READ, SSP++, MEM_NULL);
+                SP = pop_stack(bus, &SSP);
+                PC = pop_stack(bus, &SSP);
                 bus.mode = MODE_USER;
                 within_interrupt = false;
                 break;
@@ -438,13 +440,14 @@ void main_cpu(struct MemoryBus bus, int timer_period) {
         }
 
         // Timer interrupt
+        // TODO: Should the timer increment during non-timer interrupts?
         if (!within_interrupt) {
             if (timer_count >= timer_period) {
                 timer_count = 0;
                 within_interrupt = true;
                 bus.mode = MODE_KERNEL;
-                memory_request(bus, MEM_WRITE, --SSP, PC);
-                memory_request(bus, MEM_WRITE, --SSP, SP);
+                push_stack(bus, &SSP, PC);
+                push_stack(bus, &SSP, SP);
                 SP = SSP;
                 PC = 1000;
             } else {
@@ -455,8 +458,22 @@ void main_cpu(struct MemoryBus bus, int timer_period) {
 }
 
 /**
- * Retrieves the next operand from memory and increments the Program Counter.
+ * Retrieves the next operand from memory and increments the program counter in place.
  */
 int get_next_operand(struct MemoryBus bus, int *PC) {
-    return memory_request(bus, MEM_READ, ++*PC, MEM_NULL);
+    return memory_request(bus, MEM_READ, ++(*PC), MEM_NULL);
+}
+
+/**
+ * Decrements a stack pointer in place then pushes an item into the new address
+ */
+void push_stack(struct MemoryBus bus, int *stack_ptr, int item) {
+    memory_request(bus, MEM_WRITE, --(*stack_ptr), item);
+}
+
+/**
+ * Reads an item at a stack pointer address then increments it in place.
+ */
+int pop_stack(struct MemoryBus bus, int *stack_ptr) {
+    return memory_request(bus, MEM_READ, (*stack_ptr)++, MEM_NULL);
 }
