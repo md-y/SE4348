@@ -5,19 +5,33 @@
 #include <time.h>
 #include <unistd.h>
 
+// Memory size
 #define MEM_SIZE 2000
 
+// Memory bus message actions
 #define MEM_WRITE 0
 #define MEM_READ 1
 #define MEM_KILL 2
 
+// Used for memory messages that don't need a value
 #define MEM_NULL 0
 
+// Memory initialization status messages
 #define MEM_READY 0
 #define MEM_FAIL 1
 
+// Memory permission modes. Used by the memory bus
 #define MODE_USER 0
 #define MODE_KERNEL 1
+
+// Interrupt flags (none is no interrupt)
+#define INTERRUPT_NONE 0
+#define INTERRUPT_SYSCALL 1
+#define INTERRUPT_TIMER 2
+
+// Interrupt handler Addresses
+#define ADDR_TIMER 1000
+#define ADDR_SYSCALL 1500
 
 // Struct to hold file descriptors for the two pipes used to communicate between the CPU and Memory processes.
 // Also handles memory reading/writing permissions.
@@ -62,6 +76,7 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
 
+    // Create the memory bus with above pipe pair
     struct MemoryBus bus;
     bus.write_to_mem = pipefd_cpu[1];
     bus.read_from_cpu = pipefd_cpu[0];
@@ -224,17 +239,24 @@ int read_program(char *program_path, int *memory) {
  * Entry point for the CPU-only process. Effectively the main function of the CPU.
  */
 void main_cpu(struct MemoryBus bus, int timer_period) {
+    // Registers
     int PC = 0,             // Program Counter
         SP = MEM_SIZE / 2,  // User Stack Pointer (dec then write)
-        SSP = MEM_SIZE,     // System Stack Pointer (dec then write)
         IR = 0,             // Instruction register
         AC = 0,             // Accumulator
         X = 0,              // Misc register
-        Y = 0,              // Misc register
-        timer_count = 0,    // Causes interrupt when equal to or above timer_period
-        operand = 0;        // Temporary operand holding variable
+        Y = 0;              // Misc register
 
-    // TODO: Is SSP fine being separate from SP?
+    // Temporary variables
+    int timer_count = 0,  // Causes interrupt when equal to or above timer_period
+        operand,          // Temporary operand holding variable
+        SSP;              // System stack pointer
+
+    // Keeps track of which interrupt the processor is handling to avoid nested ones
+    short interrupt_flag = INTERRUPT_NONE;
+
+    // Seed RNG for instructions that need it
+    srand(time(NULL));
 
     // Wait for memory to read the program file and signal that it is ready
     int memory_ready_message;
@@ -244,11 +266,7 @@ void main_cpu(struct MemoryBus bus, int timer_period) {
         exit(1);
     }
 
-    // Seed RNG for instructions that need it
-    srand(time(NULL));
-
     // Loop will only exit when the program calls the Exit instruction
-    bool within_interrupt = false;
     for (;;) {
         // Fetch instruction
         IR = memory_request(bus, MEM_READ, PC, MEM_NULL);
@@ -297,7 +315,6 @@ void main_cpu(struct MemoryBus bus, int timer_period) {
 
             case 8:  // Get
                 AC = rand() % 100 + 1;
-                // TODO: Inclusive?
                 PC++;
                 break;
 
@@ -416,19 +433,25 @@ void main_cpu(struct MemoryBus bus, int timer_period) {
                 break;
 
             case 29:  // Int (System call)
-                within_interrupt = true;
+                if (interrupt_flag != INTERRUPT_NONE) {
+                    printf("CPU: No nested interrupts (attempted syscall during another interrupt)\n");
+                    exit(1);
+                }
+                interrupt_flag = INTERRUPT_SYSCALL;
                 bus.mode = MODE_KERNEL;
+                SSP = MEM_SIZE;
                 push_stack(bus, &SSP, PC + 1);  // +1 because we don't want to repeat this instruction
                 push_stack(bus, &SSP, SP);
                 SP = SSP;
-                PC = 1500;
+                PC = ADDR_SYSCALL;
                 break;
 
             case 30:  // IRet
+                SSP = SP;
                 SP = pop_stack(bus, &SSP);
                 PC = pop_stack(bus, &SSP);
                 bus.mode = MODE_USER;
-                within_interrupt = false;
+                interrupt_flag = INTERRUPT_NONE;
                 break;
 
             case 50:  // Exit
@@ -440,19 +463,22 @@ void main_cpu(struct MemoryBus bus, int timer_period) {
         }
 
         // Timer interrupt
-        // TODO: Should the timer increment during non-timer interrupts?
-        if (!within_interrupt) {
-            if (timer_count >= timer_period) {
-                timer_count = 0;
-                within_interrupt = true;
-                bus.mode = MODE_KERNEL;
-                push_stack(bus, &SSP, PC);
-                push_stack(bus, &SSP, SP);
-                SP = SSP;
-                PC = 1000;
-            } else {
-                timer_count++;
-            }
+        if (interrupt_flag == INTERRUPT_NONE && timer_count >= timer_period) {
+            timer_count = 0;
+            interrupt_flag = INTERRUPT_TIMER;
+            bus.mode = MODE_KERNEL;
+            SSP = MEM_SIZE;
+            push_stack(bus, &SSP, PC);
+            push_stack(bus, &SSP, SP);
+            SP = SSP;
+            PC = ADDR_TIMER;
+        }
+
+        // Increment the timer count, but throw an error if it will cause an infinite series of interrupts
+        timer_count++;
+        if (interrupt_flag == INTERRUPT_TIMER && timer_count >= timer_period) {
+            printf("CPU: Timer handler exceeded timer period, resulting in an infinite loop. Aborted.\n");
+            exit(1);
         }
     }
 }
