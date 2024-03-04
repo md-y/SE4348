@@ -16,6 +16,9 @@
 // Used for memory messages that don't need a value
 #define MEM_NULL 0
 
+// Default value for all memory locations
+#define MEM_NODATA 0
+
 // Memory initialization status messages
 #define MEM_READY 0
 #define MEM_FAIL 1
@@ -60,7 +63,7 @@ void push_stack(struct MemoryBus bus, int *stack_ptr, int item);
 int pop_stack(struct MemoryBus bus, int *stack_ptr);
 
 /**
- * Entry point for the program. Its only role is to fork the CPU and Memory processes.
+ * Entry point for the program. Its only role is to setup communication and fork the CPU and Memory processes.
  */
 int main(int argc, char *argv[]) {
     // Check argument count
@@ -132,7 +135,8 @@ int memory_request(struct MemoryBus bus, unsigned short action, unsigned short a
  */
 void main_memory(struct MemoryBus bus, char *program_path) {
     // This is the emulator's main memory. The first half is user space, second half is system space
-    int memory[MEM_SIZE];
+    // We want each location to be 0 initially so there aren't arbitrary instructions in unused memory
+    int memory[MEM_SIZE] = {MEM_NODATA};
 
     // Read the source program into memory
     int err = read_program(program_path, memory);
@@ -184,11 +188,7 @@ int read_program(char *program_path, int *memory) {
     FILE *program_file = fopen(program_path, "r");
     if (program_file == NULL) return -1;
 
-    // By default, make the timer interrupt return instantly
-    // TODO: This ok?
-    memory[1000] = 30;
-
-    char c;
+    char c;  // Character buffer for loop
     bool address_change = false;
     int mem_index = 0, err = 0;
 
@@ -288,7 +288,8 @@ void main_cpu(struct MemoryBus bus, int timer_period) {
                 operand = get_next_operand(bus, &PC);
                 operand = memory_request(bus, MEM_READ, operand, MEM_NULL);
                 AC = memory_request(bus, MEM_READ, operand, MEM_NULL);
-                break;  // TODO: Verify
+                PC++;
+                break;
 
             case 4:  // LoadIdxX address
                 operand = get_next_operand(bus, &PC);
@@ -457,7 +458,18 @@ void main_cpu(struct MemoryBus bus, int timer_period) {
             case 50:  // Exit
                 return;
 
-            default:
+            // Error Cases:
+            case MEM_NODATA:  // No Instruction
+                if (PC == ADDR_SYSCALL) {
+                    printf("CPU: Did syscall without an interrupt handler. No instruction at: %d\n", PC);
+                } else if (PC == ADDR_TIMER) {
+                    printf("CPU: Did timer interrupt without an interrupt handler. No instruction at: %d\n", PC);
+                } else {
+                    printf("CPU: No instruction at address %d\n", PC);
+                }
+                exit(1);
+
+            default:  // Unknown, nonzero instruction
                 printf("CPU: Unknown instruction: %d\n", IR);
                 exit(1);
         }
