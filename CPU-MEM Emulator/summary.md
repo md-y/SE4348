@@ -1,0 +1,28 @@
+# Project Purpose
+
+The primary purpose of this project is to emulate a simple CPU and memory system using a basic instruction set. It is meant to foster a further understanding of how operating systems operate. Specifically, it helps demonstrate how CPUs interact with the memory to retrieve and decode instructions as well as how these instructions interact with memory, registers, and the stack. The project also highlights the importance of security and user modes when interacting with memory.
+
+# Implementation
+
+This project is implemented in C.
+
+It separates the CPU execution and memory into two processes using a UNIX fork. These processes then communicate using a common message format over UNIX pipes that act as a hypothetical _memory bus_. Essentially, the CPU process sends a memory request to read or write data, and the memory process responds with the appropriate data from memory. The CPU process is also the parent process, so it can also send a request to the memory process to kill it.
+
+The CPU primarily operates an infinite loop that requests an instruction from memory, performs the operation (as decided by a long _switch_ statement), increments a timer, and repeats. Once this timer reaches the timer period argument, it performs an interrupt that stops the normal execution and jumps to the timer handler address. It also pushes the original PC and SP headers to the stack before jumping, and pops them once it returns. Since the timer is always incrementing, the CPU can enter an infinite loop if the interrupt handler is longer than the timer period. That is why the CPU also checks the timer status every instruction cycle to see if it is an infinite loop, exiting with an error if it is. Otherwise, it will continue normal execution until the user program performs the exit command, causing the CPU process to return and send a kill request to the memory process.
+
+The first action of the memory process is to read the input program file. Once it finishes, it tells the CPU process it is ready and starts an infinite loop. This loop listens for messages from the CPU, and once it receives one, it decodes it and sends the appropriate data from memory which is implemented as a large integer array. If the request is to die, it will exit the process.
+
+# Personal Experience
+
+My first decision was to decide between C, C++, and Java. Since a requirement is to split the process, I chose to use UNIX forks since I hated the idea of running a Java CLI command to start another Java process instead of simply calling `fork()`. I chose C instead of C++ since I had never used normal C, and I thought it would be fun to learn it. I definitely had some challenges because of these choices, but I definitely learned more than if I had chosen Java or C++.
+
+The first part of implementation after splitting the processes was to setup CPU and memory communication. I abstracted this idea into a system bus _struct_ that had fields for CPU-to-memory, memory-to-CPU communication, and the user mode. This idea worked great because it simplified the communication process immensely. Similarly, I standardized the pipe messages to another _struct_ so the memory process always new how long messages would be. This meant some messages (like kill) had so send extra empty data, but this trade-off was worth it for further simplicity.
+
+After setting up communication between the processes, I started implementing each instruction. I did this by attempting to run a program, seeing an "unknown instruction" error, implementing the instruction, and trying again. Using this approach, I eventually implemented each sample program. However, I had some challenges during this process.
+
+I initially incremented the PC counter at the end of the infinite loop during each iteration. However, this became confusing since some instructions need to increment the PC counter to get the next operand while some completely overwrote it with another data. This meant I had to anticipate the PC increment at the end by decrementing it in order to increment it later for some instructions. I did not like this, so I removed the default PC increment and handled it on a per-instruction basis. This caused the line `PC++` to be repeated often, but it was worth it to avoid confusion and add readability.
+
+The biggest challenge I had was with the timer. Since interrupts should not occur during other interrupts, I initially only incremented the timer counter during non-interrupt instructions. However, this meant it only ran during user mode which is against the requirements. I changed it to always increment, but this then caused an infinite loop when the handler code was too long. This made me switch from a binary boolean flag (`is in interrupt` and `not in interrupt`) to a three-value flag instead (`no interrupt`, `syscall`, and `timer`). This allowed me to detect when the timer interrupt is about to occur, and if it is already handling a timer interrupt, exit the program with an error. Although there are some cases when an infinite loop would not occur, this makes sure none of the sample codes will run indefinitely when called with small timer arguments.
+
+The final change I made was to initialize the memory array to zero. This was better than having the uninitialized pseudo-random values created by the C compiler. This is because I could detect if a read instruction was zero and cause a more specific "instruction undefined" error when reading memory locations with no instructions. This approach also avoided the rare instance when the random instruction was a valid instruction, causing undefined behavior from the user program.
+
