@@ -487,9 +487,10 @@ void main_cpu(struct MemoryBus bus, int timer_period) {
         }
 
         // Increment the timer count, but throw an error if it will cause an infinite series of interrupts
+        // The timer handler code may actually escape the loop, but this assumes it wont
         timer_count++;
         if (interrupt_flag == INTERRUPT_TIMER && timer_count >= timer_period) {
-            printf("CPU: Timer handler exceeded timer period, resulting in an infinite loop. Aborted.\n");
+            printf("CPU: Timer handler exceeded timer period, resulting in a reapeated timer interrupt. This will likely cause an infinite loop. Aborted.\n");
             exit(1);
         }
     }
