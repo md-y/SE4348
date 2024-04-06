@@ -58,6 +58,10 @@ public class Project2 {
   }
 }
 
+/**
+ * Used to store the state of the office and provide synchronization for the
+ * threads.
+ */
 class OfficeContext {
   public OfficeQueue<Patient> receptionistQueue;
   public OfficeQueue<Patient> nurseQueue;
@@ -85,7 +89,10 @@ class OfficeContext {
     }
   }
 
-  public static void safeAquire(Semaphore s) {
+  /**
+   * Acquire a semaphore, and if there is an exception, quit.
+   */
+  public static void safeAcquire(Semaphore s) {
     try {
       s.acquire();
     } catch (InterruptedException e) {
@@ -95,6 +102,9 @@ class OfficeContext {
   }
 }
 
+/**
+ * Generic office prerson with a reference to an office conext and ID.
+ */
 class OfficePerson {
   protected OfficeContext context;
   protected int id;
@@ -105,13 +115,22 @@ class OfficePerson {
   }
 }
 
+/**
+ * A queue used to consume a set size number of OfficePersons (i.e. Patients)
+ * by a set size of consumers (i.e. Doctors, Nurses, etc).
+ */
 class OfficeQueue<Person extends OfficePerson> {
-  private ArrayDeque<Person> queue;
   private Semaphore queueMutex = new Semaphore(1, true);
+  private ArrayDeque<Person> queue;
+
+  // Number of unprocessed items in the queue
   private Semaphore waitingSize = new Semaphore(0, true);
+
+  // Semaphores for each producer to wait for their item to be processed
   private Semaphore waitingProducers[];
 
-  private Semaphore processingItemsMutex = new Semaphore(1, true); // Mutex is for both
+  // Mutex is for both
+  private Semaphore processingItemsMutex = new Semaphore(1, true);
   private int processingConsumers;
   private int remainingItems;
 
@@ -125,35 +144,52 @@ class OfficeQueue<Person extends OfficePerson> {
     }
   }
 
+  /**
+   * Safely add a person to the queue
+   */
   public void enqueue(Person p) {
-    OfficeContext.safeAquire(queueMutex);
+    OfficeContext.safeAcquire(queueMutex);
     queue.add(p);
     queueMutex.release();
     waitingSize.release();
   }
 
+  /**
+   * Wait for an enqueue and dequeue the next person
+   */
   public Person waitAndDequeue() {
-    OfficeContext.safeAquire(waitingSize);
-    OfficeContext.safeAquire(queueMutex);
+    OfficeContext.safeAcquire(waitingSize);
+    OfficeContext.safeAcquire(queueMutex);
     Person p = queue.poll();
     queueMutex.release();
     return p;
   }
 
+  /**
+   * Wait for a signal that a person has been processed via their ID
+   */
   public void waitForProcessing(Person p) {
-    OfficeContext.safeAquire(waitingProducers[p.id]);
+    OfficeContext.safeAcquire(waitingProducers[p.id]);
   }
 
+  /**
+   * Signal that a person has been processed by their id
+   */
   public void signalProcessed(Person p) {
-    OfficeContext.safeAquire(processingItemsMutex);
+    OfficeContext.safeAcquire(processingItemsMutex);
     remainingItems--;
     processingItemsMutex.release();
     waitingProducers[p.id].release();
   }
 
+  /**
+   * Are there few enough remaining items that this consumer can quit?
+   * If true, the consumer is considered done. This also assumes all consumers are
+   * the equal and always trying to process.
+   */
   public boolean canConsumerQuit() {
     boolean canQuit = false;
-    OfficeContext.safeAquire(processingItemsMutex);
+    OfficeContext.safeAcquire(processingItemsMutex);
     if (processingConsumers > remainingItems) {
       canQuit = true;
       processingConsumers--;
@@ -184,7 +220,7 @@ class Doctor extends OfficePerson implements Runnable {
 
   public void run() {
     while (!context.doctorQueue.canConsumerQuit()) {
-      context.readyDoctors[id].release();
+      context.readyDoctors[id].release(); // Signal to nurse that doctor is ready
       Patient p = context.doctorQueue.waitAndDequeue();
       System.out.println("Doctor " + id + " listens to symptoms from patient " + p.id);
       context.doctorQueue.signalProcessed(p);
@@ -199,7 +235,7 @@ class Nurse extends OfficePerson implements Runnable {
 
   public void run() {
     while (!context.nurseQueue.canConsumerQuit()) {
-      OfficeContext.safeAquire(context.readyDoctors[id]);
+      OfficeContext.safeAcquire(context.readyDoctors[id]); // Wait for doctor to be ready
       Patient p = context.nurseQueue.waitAndDequeue();
       System.out.println("Nurse " + id + " takes patient " + p.id + " to doctor's office");
       context.assignedDoctor[p.id] = id; // Safe because each index is only written to once
