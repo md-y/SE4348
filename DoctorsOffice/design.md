@@ -202,7 +202,9 @@ run() {
     signal(receptionistQueue.waitingProducers[patient])
 
     // This tells a nurse that there is a new patient
+    wait(nurseQueue.queue)
     enqueue(nurseQueue, patient)
+    signal(nurseQueue.queue)
   }
 }
 ```
@@ -224,6 +226,7 @@ tryToQuit() {
     remainingNurses--
     canQuit = true
   }
+  signal(nurseTracker.remaining)
   return canQuit
 }
 
@@ -271,6 +274,7 @@ tryToQuit() {
     remainingDoctors--
     canQuit = true
   }
+  signal(dockerTracker.remaining)
   return canQuit
 }
 
