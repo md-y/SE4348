@@ -1,4 +1,4 @@
-import java.util.ArrayDeque;
+import java.util.LinkedList;
 import java.util.concurrent.Semaphore;
 
 public class Project2 {
@@ -65,28 +65,47 @@ public class Project2 {
 class OfficeContext {
   public OfficeQueue<Patient> receptionistQueue;
   public OfficeQueue<Patient> nurseQueue;
-  public OfficeQueue<Patient> doctorQueue;
 
+  public Semaphore patientsReadyForNurse[];
+
+  // For nurse to doctor hand-off:
+  public Semaphore doctorsWaitingForPatient[];
   public Semaphore readyDoctors[];
+  public Semaphore doctorFinished[];
+  public Semaphore patientHasLeft[];
   public int assignedDoctor[];
+  public int assignedPatient[];
+
+  public RemainingItemsTracker nurseTracker;
+  public RemainingItemsTracker doctorTracker;
 
   public final int totalPatients;
 
   OfficeContext(int doctorCount, int patientCount) {
-    receptionistQueue = new OfficeQueue<Patient>(patientCount, 1);
-    nurseQueue = new OfficeQueue<Patient>(patientCount, doctorCount);
-    doctorQueue = new OfficeQueue<Patient>(patientCount, doctorCount);
-
     totalPatients = patientCount;
-    assignedDoctor = new int[patientCount];
-    for (int i = 0; i < patientCount; i++) {
-      assignedDoctor[i] = -1;
-    }
 
-    readyDoctors = new Semaphore[doctorCount];
-    for (int i = 0; i < doctorCount; i++) {
-      readyDoctors[i] = new Semaphore(0, true);
+    receptionistQueue = new OfficeQueue<Patient>(patientCount);
+    nurseQueue = new OfficeQueue<Patient>(patientCount);
+
+    assignedDoctor = new int[patientCount];
+    patientsReadyForNurse = initSemaphores(patientCount, 0);
+    patientHasLeft = initSemaphores(patientCount, 0);
+
+    readyDoctors = initSemaphores(doctorCount, 0);
+    doctorsWaitingForPatient = initSemaphores(doctorCount, 0);
+    doctorFinished = initSemaphores(doctorCount, 0);
+    assignedPatient = new int[doctorCount];
+
+    nurseTracker = new RemainingItemsTracker(patientCount, doctorCount);
+    doctorTracker = new RemainingItemsTracker(patientCount, doctorCount);
+  }
+
+  private Semaphore[] initSemaphores(int size, int initialValue) {
+    Semaphore semaphores[] = new Semaphore[size];
+    for (int i = 0; i < size; i++) {
+      semaphores[i] = new Semaphore(initialValue, true);
     }
+    return semaphores;
   }
 
   /**
@@ -103,7 +122,7 @@ class OfficeContext {
 }
 
 /**
- * Generic office prerson with a reference to an office conext and ID.
+ * Generic office person with a reference to an office context and ID.
  */
 class OfficePerson {
   protected OfficeContext context;
@@ -116,12 +135,66 @@ class OfficePerson {
 }
 
 /**
- * A queue used to consume a set size number of OfficePersons (i.e. Patients)
- * by a set size of consumers (i.e. Doctors, Nurses, etc).
+ * A semaphore-based mutex class for protecting a value.
+ */
+class MutexValue<V> {
+  public V value;
+  private Semaphore mutex = new Semaphore(1, true);
+
+  MutexValue(V initialValue) {
+    value = initialValue;
+  }
+
+  public void acquire() {
+    OfficeContext.safeAcquire(mutex);
+  }
+
+  public void release() {
+    mutex.release();
+  }
+}
+
+/**
+ * Used to check if a worker can stop working based on the number of items left
+ * and workers still running.
+ */
+class RemainingItemsTracker {
+  // Array is a tuple: [items left, workers left]
+  private MutexValue<Integer[]> remaining;
+
+  RemainingItemsTracker(int totalItems, int totalWorkers) {
+    remaining = new MutexValue<Integer[]>(new Integer[] { totalItems, totalWorkers });
+  }
+
+  /**
+   * Are there few enough remaining items so that this worker can quit?
+   * If true, the worker is considered done. This also assumes all workers are
+   * equal and always trying to process.
+   */
+  public boolean attemptToQuit() {
+    boolean shouldQuit = false;
+    remaining.acquire();
+    if (remaining.value[1] > remaining.value[0]) {
+      shouldQuit = true;
+      remaining.value[1]--;
+    }
+    remaining.release();
+    return shouldQuit;
+  }
+
+  public void decrementRemaining() {
+    remaining.acquire();
+    remaining.value[0]--;
+    remaining.release();
+  }
+}
+
+/**
+ * A queue that can be safely added to by a producer and detect when its item
+ * was processed.
  */
 class OfficeQueue<Person extends OfficePerson> {
-  private Semaphore queueMutex = new Semaphore(1, true);
-  private ArrayDeque<Person> queue;
+  private MutexValue<LinkedList<Person>> queue = new MutexValue<>(new LinkedList<>());
 
   // Number of unprocessed items in the queue
   private Semaphore waitingSize = new Semaphore(0, true);
@@ -129,17 +202,9 @@ class OfficeQueue<Person extends OfficePerson> {
   // Semaphores for each producer to wait for their item to be processed
   private Semaphore waitingProducers[];
 
-  // Mutex is for both
-  private Semaphore processingItemsMutex = new Semaphore(1, true);
-  private int processingConsumers;
-  private int remainingItems;
-
-  OfficeQueue(int producerSize, int consumerSize) {
-    processingConsumers = consumerSize;
-    remainingItems = producerSize;
-    queue = new ArrayDeque<Person>(producerSize);
-    waitingProducers = new Semaphore[producerSize];
-    for (int i = 0; i < producerSize; i++) {
+  OfficeQueue(int maxProducers) {
+    waitingProducers = new Semaphore[maxProducers];
+    for (int i = 0; i < maxProducers; i++) {
       waitingProducers[i] = new Semaphore(0, true);
     }
   }
@@ -148,9 +213,9 @@ class OfficeQueue<Person extends OfficePerson> {
    * Safely add a person to the queue
    */
   public void enqueue(Person p) {
-    OfficeContext.safeAcquire(queueMutex);
-    queue.add(p);
-    queueMutex.release();
+    queue.acquire();
+    queue.value.add(p);
+    queue.release();
     waitingSize.release();
   }
 
@@ -159,9 +224,9 @@ class OfficeQueue<Person extends OfficePerson> {
    */
   public Person waitAndDequeue() {
     OfficeContext.safeAcquire(waitingSize);
-    OfficeContext.safeAcquire(queueMutex);
-    Person p = queue.poll();
-    queueMutex.release();
+    queue.acquire();
+    Person p = queue.value.poll();
+    queue.release();
     return p;
   }
 
@@ -176,26 +241,7 @@ class OfficeQueue<Person extends OfficePerson> {
    * Signal that a person has been processed by their id
    */
   public void signalProcessed(Person p) {
-    OfficeContext.safeAcquire(processingItemsMutex);
-    remainingItems--;
-    processingItemsMutex.release();
     waitingProducers[p.id].release();
-  }
-
-  /**
-   * Are there few enough remaining items that this consumer can quit?
-   * If true, the consumer is considered done. This also assumes all consumers are
-   * the equal and always trying to process.
-   */
-  public boolean canConsumerQuit() {
-    boolean canQuit = false;
-    OfficeContext.safeAcquire(processingItemsMutex);
-    if (processingConsumers > remainingItems) {
-      canQuit = true;
-      processingConsumers--;
-    }
-    processingItemsMutex.release();
-    return canQuit;
   }
 }
 
@@ -205,10 +251,14 @@ class Receptionist extends OfficePerson implements Runnable {
   }
 
   public void run() {
-    while (!context.receptionistQueue.canConsumerQuit()) {
+    // The receptionist will see every patient, so it can be a simple for loop
+    for (int i = 0; i < context.totalPatients; i++) {
       Patient p = context.receptionistQueue.waitAndDequeue();
       System.out.println("Receptionist registers patient " + p.id);
       context.receptionistQueue.signalProcessed(p);
+
+      // Tell nurse that a patient will be ready soon
+      context.nurseQueue.enqueue(p);
     }
   }
 }
@@ -219,11 +269,14 @@ class Doctor extends OfficePerson implements Runnable {
   }
 
   public void run() {
-    while (!context.doctorQueue.canConsumerQuit()) {
+    while (!context.doctorTracker.attemptToQuit()) {
       context.readyDoctors[id].release(); // Signal to nurse that doctor is ready
-      Patient p = context.doctorQueue.waitAndDequeue();
-      System.out.println("Doctor " + id + " listens to symptoms from patient " + p.id);
-      context.doctorQueue.signalProcessed(p);
+      OfficeContext.safeAcquire(context.doctorsWaitingForPatient[id]); // Wait for patient
+      int assignedPatient = context.assignedPatient[id];
+      System.out.println("Doctor " + id + " listens to symptoms from patient " + assignedPatient);
+      context.doctorFinished[id].release(); // Signal to patient that doctor is done
+      OfficeContext.safeAcquire(context.patientHasLeft[assignedPatient]); // Wait for patient to leave
+      context.doctorTracker.decrementRemaining();
     }
   }
 }
@@ -234,12 +287,15 @@ class Nurse extends OfficePerson implements Runnable {
   }
 
   public void run() {
-    while (!context.nurseQueue.canConsumerQuit()) {
+    while (!context.nurseTracker.attemptToQuit()) {
       OfficeContext.safeAcquire(context.readyDoctors[id]); // Wait for doctor to be ready
       Patient p = context.nurseQueue.waitAndDequeue();
+      OfficeContext.safeAcquire(context.patientsReadyForNurse[p.id]); // Wait for patient to be ready
       System.out.println("Nurse " + id + " takes patient " + p.id + " to doctor's office");
       context.assignedDoctor[p.id] = id; // Safe because each index is only written to once
+      context.assignedPatient[id] = p.id; // Safe because this is the only thread for this index
       context.nurseQueue.signalProcessed(p);
+      context.nurseTracker.decrementRemaining();
     }
   }
 }
@@ -257,16 +313,17 @@ class Patient extends OfficePerson implements Runnable {
     System.out.println("Patient " + id + " leaves receptionist and sits in waiting room");
 
     // Patient is led by a nurse
-    context.nurseQueue.enqueue(this);
+    context.patientsReadyForNurse[id].release();
     context.nurseQueue.waitForProcessing(this);
     int assignedDoctor = context.assignedDoctor[id];
     System.out.println("Patient " + id + " enters doctor " + assignedDoctor + "'s office");
 
     // Patient meets with doctor
-    context.doctorQueue.enqueue(this);
-    context.doctorQueue.waitForProcessing(this);
+    context.doctorsWaitingForPatient[assignedDoctor].release();
+    OfficeContext.safeAcquire(context.doctorFinished[assignedDoctor]);
     System.out.println("Patient " + id + " receives advice from doctor " + assignedDoctor);
 
     System.out.println("Patient " + id + " leaves");
+    context.patientHasLeft[id].release();
   }
 }
