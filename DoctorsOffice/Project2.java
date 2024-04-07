@@ -89,11 +89,11 @@ class OfficeContext {
 
     assignedDoctor = new int[patientCount];
     patientsReadyForNurse = initSemaphores(patientCount, 0);
-    patientHasLeft = initSemaphores(patientCount, 0);
 
     readyDoctors = initSemaphores(doctorCount, 0);
     doctorsWaitingForPatient = initSemaphores(doctorCount, 0);
     doctorFinished = initSemaphores(doctorCount, 0);
+    patientHasLeft = initSemaphores(doctorCount, 0);
     assignedPatient = new int[doctorCount];
 
     nurseTracker = new RemainingItemsTracker(patientCount, doctorCount);
@@ -275,7 +275,7 @@ class Doctor extends OfficePerson implements Runnable {
       int assignedPatient = context.assignedPatient[id];
       System.out.println("Doctor " + id + " listens to symptoms from patient " + assignedPatient);
       context.doctorFinished[id].release(); // Signal to patient that doctor is done
-      OfficeContext.safeAcquire(context.patientHasLeft[assignedPatient]); // Wait for patient to leave
+      OfficeContext.safeAcquire(context.patientHasLeft[id]); // Wait for patient to leave
       context.doctorTracker.decrementRemaining();
     }
   }
@@ -324,6 +324,6 @@ class Patient extends OfficePerson implements Runnable {
     System.out.println("Patient " + id + " receives advice from doctor " + assignedDoctor);
 
     System.out.println("Patient " + id + " leaves");
-    context.patientHasLeft[id].release();
+    context.patientHasLeft[assignedDoctor].release();
   }
 }
