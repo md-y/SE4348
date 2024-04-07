@@ -1,18 +1,28 @@
-# Overview
+## Design Overview
 
-Since the program is implemented in Java, it was designed with OOP principles in mind. The main classes are `Patient`, `Receptionist`, `Nurse`, and `Doctor`. Instances of these classes act as individual threads.
+Since the program is implemented in Java, it is designed with OOP principles in mind. This means that every person in the doctor's office (patients, the receptionist, doctors, and nurses) are represented as classes where each instance is a thread.
 
-All instances share a common state, so there is another class `OfficeContext` that has the role of initializing semaphores and storing global variables.
+However, since all these threads must communicate with each other, there is a stand-alone context class that stores all semaphores and other global data for these classes.
 
-There are also a few helper classes that help manage semaphore operations, such as a `MutexValue` class, a `OfficeQueue` class for managing queues, and a `RemainingItemsTracker` that keeps track of the remaining tasks for each entity.
+In the actual implementation, these person classes are `Patient`, `Receptionist`, `Nurse`, and `Doctor`. These classes inherit `Runnable` so they can be run as threads. The `OfficeContext` that has the role of initializing semaphores and storing global variables.
 
-However, for brevity and simplicity, the following semaphore list and pseudocode mostly ignore these implementation definitions and instead focus on core logic.
+There are also a few helper classes that help manage semaphore operations, such as a `MutexValue` class, a `OfficeQueue` class for managing queues concurrently, and a `RemainingItemsTracker` that keeps track of the remaining tasks for each entity. Of course, these classes exclusively use semaphores.
+
+`MutexValue` is used to manage values that are shared among multiple threads. Essentially, it is a wrapper around a value that can be locked and unlocked using a binary semaphore. As an example, it is used for locking/unlocking the check in queue.
+
+Queues are implemented using the `OfficeQueue` class. This class has a mutex value that protects a linked list queue. Whenever an item is enqueued, a counting semaphore representing the number of unprocessed items in the queue is incremented. This lets consumers run when there are new items in the queue. There is also an array of semaphores that allow producers to wait until their produced item is processed. This is useful for, as an example, when a patient enters the check in queue and needs to know when they can sit back down.
+
+Finally, there is a `RemainingItemsTracker` class that is used by the doctor and nurse threads to know when to exit. Unlike the receptionist thread that knows it will see every patient, some doctor/nurse threads will see differing number of patients. This class allows them to keep track of how many more patients they could see, and if the remaining number is less than the number of threads, they know they can exit. This is implemented via a pair of integers with a corresponding mutex semaphore. One integer represents the number of threads still working, and the other is the number of items remaining.
+
+For brevity and simplicity, the following semaphore list and pseudocode mostly ignore these implementation definitions and instead focus on core logic. However, everything from these classes is still included.
 
 ## Semaphores
 
-The following semaphores were used to manage interactions between patients and each other entity (the receptionist, nurses, and doctors).
+The following semaphores were used to manage interactions between patients and each other entity (the receptionist, nurses, and doctors). Because of this, each semaphore can be categorized into which non-patient person needs it.
 
-### Receptionist Semaphores
+#### Receptionist Semaphores
+
+The patient check in processes needs to use a queue, so the receptionist can print the patient ID in a FIFO manner. This requires three semaphores: the queue mutex, a counting semaphore for the new items, and an array of binary semaphores for the patients to wait on.
 
 These are for the receptionist queue (part of `OfficeQueue` instance in code):
 
@@ -20,14 +30,16 @@ These are for the receptionist queue (part of `OfficeQueue` instance in code):
 // Mutex semaphore for the check-in queue
 receptionistQueue.queue = 1
 
-// Semaphore counting the number of waiting items
+// Counting semaphore for the number of waiting items
 receptionistQueue.waitingSize = 0
 
-// Semaphore array used to signal patients they are checked-in
+// Binary semaphore array used to signal patients they are checked-in
 receptionistQueue.waitingProducers = "all 0s array of size patient_count"
 ```
 
-### Nurse Semaphores
+#### Nurse Semaphores
+
+The nurse also has a queue for patients, but the patients are added by the receptionist since they are in charge of notifying the nurse (as per the requirements). The nurse has the similar semaphores for this.
 
 These are for the nurse queue (part of `OfficeQueue` instance in code):
 
@@ -35,46 +47,48 @@ These are for the nurse queue (part of `OfficeQueue` instance in code):
 // Mutex semaphore for queue
 nurseQueue.queue = 1
 
-// Semaphore counting the number of waiting items
+// Counting semaphore for the number of waiting items
 nurseQueue.waitingSize = 0
 
-// Semaphores used to signal patients they have been led by a nurse
+// Binary semaphores used to signal patients they have been led by a nurse
 nurseQueue.waitingProducers = "all 0s array of size patient_count"
 ```
 
-These are for the nurse tracker (part of `RemainingItemsTracker` in code):
+The nurse also needs to know when to quit the thread. A thread is able to quit when there are more nurse threads than unprocessed patients. This can be implemented using two numbers (remaining items and worker count) with one associated mutex.
+
+This is for the nurse tracker (part of `RemainingItemsTracker` in code):
 
 ```java
 // Mutex for remaining items and worker count tuple
 nurseTracker.remaining = 1
 ```
 
-These are other semaphores for nurses:
+There is one more semaphore array needed for the nurse to wait on a specific patient to return to the waiting room before being led off. Without this, the nurse could lead away a patient, and then the patient says they enter the waiting room.
 
 ```java
-// Semaphores used to signal nurses that a patient is ready to be led
+// Binary semaphores used to signal nurses that a patient is ready to be led
 patientsWaitingForNurse = "all 0s array of size patient_count"
 ```
 
-### Doctor Semaphores
+#### Doctor Semaphores
 
-These are for handling the nurse-to-doctor hand-off:
+For any pair of doctors and nurses with the same ID, they are effectively mutually exclusive. This is because a nurse cannot give another patient to a doctor while they are working, and a doctor cannot do anything until a nurse gives them a patient. Furthermore, while a patient is waiting to be seen, they cannot do anything. This means these three people need to wait on each other based on their IDs. Because of this, arrays of semaphores are optimal since a thread can wait on a specific semaphore based on an integer ID.
 
 ```java
-// Semaphores used to make doctors wait until the patient signals they are ready:
+// Binary semaphores used to make doctors wait until the patient signals they are ready:
 doctorsWaitingForPatient = "all 0s array of size doctor_count"
 
-// Used to signal a nurse that their associated doctor is ready:
+// Binary semaphores used to signal a nurse that their associated doctor is ready:
 readyDoctors = "all 0s array of size doctor_count"
 
-// Used by patients to wait for their doctor to be finished:
+// Binary semaphores used by patients to wait for their doctor to be finished:
 doctorFinished = "all 0s array of size doctor_count"
 
-// Used by doctors to wait until the patient has left before resetting:
+// Binary semaphores used by doctors to wait until the patient has left before resetting:
 patientHasLeft = "all 0s array of size doctor_count"
 ```
 
-These are for the doctor tracker (part of `RemainingItemsTracker` in code):
+Just like nurses, doctor threads need to know when to quit. These are for the doctor tracker (part of `RemainingItemsTracker` in code):
 
 ```java
 // Mutex for remaining items and worker count tuple
@@ -83,68 +97,129 @@ doctorTracker.remaining = 1
 
 ## Pseudocode
 
-The following pseudocode assumes the semaphores above were already defined during initialization, and that they are accessible by all methods.
+The following pseudocode represent a more functional version of the OOP implementation to reflect the format of the textbook (as per the project requirements). All core logic is the same, and it follows the real implementation closely.
 
-### Patient code
+#### Main (Entry)
+
+The main function is simply in charge of checking the arguments, creating the global state, and handling the threads. 
+
+```text
+main(args) {
+  check if args >= 2
+
+  doctor_count = args[0]
+  patient_count = args[1]
+
+  check if 0 < doctor_count <= 3
+  check if 0 < patient_count <= 15
+
+  state = create global state object that holds state for all threads
+
+  threads = thread array for all runnables
+  add receptionist to thread array
+  add doctors to thread array
+  add patients to thread array
+
+  for each thread in threads, start
+
+  for each thread in threads, join
+}
+```
+
+#### Global State Object
+
+This object is shared between all threads. It creates semaphores exactly as described [[#Semaphores|above]] as well as a few non-semaphore shared variables.
+
+```
+init() {
+  initialize all semaphores as stated at the top of the document
+
+  // These arrays are needed since patients, nurses, and doctors need
+  // to know specifically who they are interacting with.
+  // They are indexed by patient IDs and doctor IDs.
+  assignedDoctor = int[patientCount]
+  assignedPatient = int[doctorCount]
+
+  // Can be any implementation of the queue data structure
+  receptionistQueue = new queue for patients
+  nurseQueue = new queue for patients
+}
+```
+
+#### Patient code
+
+This is the most important function since the patient threads are in charge of directing the whole simulation.
 
 ```
 run() {
   print entering message
 
-  wait(mutex for receptionistQueue)
-  enqueue(self) to receptionistQueue
-  signal(mutex for receptionistQueue)
-  signal(receptionistQueue)
+  // Use mutex to enqueue
+  wait(receptionistQueue.queue)
+  enqueue(receptionistQueue, self)
+  signal(receptionistQueue.queue)
 
-  wait(checkIn[id])
+  // Increment queue semaphore to signal new item
+  signal(receptionistQueue.waitingSize)
+
+  wait(receptionistQueue.waitingProducers[id])
 
   print leaving message
 
-  signal(readyForNurse[id])
-  wait(nurseProcessing[id])
+  signal(patientsWaitingForNurse[id])
+  wait(nurseQueue.waitingProducers[id])
 
   // Need to keep same nurse/doctor id
   doctorId = assignedDoctor[id]
 
   print entering doctor office message
 
-  signal(readyForDoctor[doctorId])
+  signal(doctorsWaitingForPatient[doctorId])
   wait(doctorFinished[doctorId])
 
   print doctor advice message
 
   print leaving message
-  signal(leftOffice[doctorId])
+  signal(patientHasLeft[doctorId])
 }
 ```
 
-### Receptionist code
+#### Receptionist code
+
+Since there is only one receptionist, this function uses a for loop based on the patient count.
 
 ```
 run() {
   for each patient {
-    wait(receptionistQueue)
-    wait(mutex for receptionistQueue)
+    wait(receptionistQueue.waitingSize)
+    
+    wait(receptionistQueue.queue)
     patient = dequeue(receptionistQueue)
-    signal(mutex for receptionistQueue)
+    signal(receptionistQueue.queue)
 
     print register message for patient
 
-    signal(checkin[patient])
+    signal(receptionistQueue.waitingProducers[patient])
 
-    enqueue(patient) to nurseQueue
+    // This tells a nurse that there is a new patient
+    enqueue(nurseQueue, patient)
   }
 }
 ```
 
-### Nurse code
+#### Nurse code
+
+Nurses make use of a `tryToQuit` function that uses a pair of integers and an associated mutex to track the remaining number of patients and currently running nurse threads. This function is also described below.
 
 ```
-remainingMetrics = [remainingPatients, remainingNurses]
+nurseTracker = [remainingPatients, remainingNurses]
 
-canIQuit() {
+tryToQuit() {
   canQuit = false
-  wait(mutex for remainingMetrics)
+
+  // Remaining is the mutex for nurseTracker
+  wait(nurseTracker.remaining)
+  
   if remainingNurses > remainingPatients {
     remainingNurses--
     canQuit = true
@@ -153,15 +228,15 @@ canIQuit() {
 }
 
 run() {
-  while !canIQuit() {
-    wait(doctorReady[id])
+  while tryToQuit() is false {
+    wait(readyDoctors[id])
 
-    wait(nurseQueue)
-    wait(mutex for nurseQueue)
+    wait(nurseQueue.waitingSize)
+    wait(nurseQueue.queue)
     patient = dequeue(nurseQueue)
-    signal(mutex for nurseQueue)
+    signal(nurseQueue.queue)
 
-    wait(patientReady[id])
+    wait(patientsReadyForNurse[id])
 
     print patient led to office message
 
@@ -175,32 +250,34 @@ run() {
 
     signal(nurseProcessed[patient.id])
 
-    wait(mutex for remainingMetrics)
+    wait(nurseTracker.remaining)
     remainingPatients--
-    signal(mutex for remainingMetrics)
+    signal(nurseTracker.remaining)
   }
 }
 ```
 
-### Doctor Code
+#### Doctor Code
+
+Like nurses, doctors also have an `tryToQuit` function.
 
 ```
-remainingMetrics = [remainingPatients, remainingNurses]
+doctorTracker = [remainingPatients, remainingDoctors]
 
-canIQuit() {
+tryToQuit() {
   canQuit = false
-  wait(mutex for remainingMetrics)
-  if remainingNurses > remainingPatients {
-    remainingNurses--
+  wait(doctorTracker.remaining)
+  if remainingDoctors > remainingPatients {
+    remainingDoctors--
     canQuit = true
   }
   return canQuit
 }
 
 run() {
-  while !canIQuit() {
+  while tryToQuit() is false {
     signal(readyDoctors[id])
-    wait(waitingForPatient[id])
+    wait(doctorsWaitingForPatient[id])
 
     patient = assignedPatient[id]
 
@@ -209,48 +286,9 @@ run() {
     signal(doctorFinished[patient.id])
     wait(patientHasLeft[id])
 
-    wait(mutex for remainingMetrics)
+    wait(doctorTracker.remaining)
     remainingPatients--
-    signal(mutex for remainingMetrics)
+    signal(doctorTracker.remaining)
   }
-}
-```
-
-### Main (Entry)
-
-```text
-main(args) {
-  check if args >= 2
-
-  doctor_count = args[0]
-  patient_count = args[1]
-
-  check if 0 < doctor_count <= 3
-  check if 0 < patient_count <= 15
-
-  state = create state object that holds state for all threads
-
-  threads = thread array for all runnables
-  add receptionist to thread array
-  add doctors to thread array
-  add patients to thread array
-
-  for each thread in threads, start
-
-  for each thread in threads, join
-}
-```
-
-### Global State Object
-
-```
-init() {
-  initialize all semaphores as stated at the top of the document
-
-  assignedDoctor = int[patientCount]
-  assignedPatient = int[doctorCount]
-
-  receptionistQueue = new queue for patients
-  nurseQueue = new queue for patients
 }
 ```
