@@ -71,13 +71,14 @@ class OfficeContext {
   // For nurse to doctor hand-off:
   public Semaphore doctorsWaitingForPatient[];
   public Semaphore readyDoctors[];
+  public Semaphore readyNurses[];
   public Semaphore doctorFinished[];
   public Semaphore patientHasLeft[];
   public int assignedDoctor[];
   public int assignedPatient[];
+  public boolean quitNurses[];
 
   public RemainingItemsTracker nurseTracker;
-  public RemainingItemsTracker doctorTracker;
 
   public final int totalPatients;
 
@@ -91,13 +92,14 @@ class OfficeContext {
     patientsReadyForNurse = initSemaphores(patientCount, 0);
 
     readyDoctors = initSemaphores(doctorCount, 0);
+    readyNurses = initSemaphores(doctorCount, 0);
     doctorsWaitingForPatient = initSemaphores(doctorCount, 0);
     doctorFinished = initSemaphores(doctorCount, 0);
     patientHasLeft = initSemaphores(doctorCount, 0);
     assignedPatient = new int[doctorCount];
+    quitNurses = new boolean[doctorCount];
 
     nurseTracker = new RemainingItemsTracker(patientCount, doctorCount);
-    doctorTracker = new RemainingItemsTracker(patientCount, doctorCount);
   }
 
   private Semaphore[] initSemaphores(int size, int initialValue) {
@@ -268,15 +270,22 @@ class Doctor extends OfficePerson implements Runnable {
     super(id, handler);
   }
 
+  /**
+   * Wait for the nurse to update their status, and only quit when they have.
+   */
+  private boolean canIQuit() {
+    OfficeContext.safeAcquire(context.readyNurses[id]);
+    return context.quitNurses[id];
+  }
+
   public void run() {
-    while (!context.doctorTracker.attemptToQuit()) {
+    while (!canIQuit()) {
       context.readyDoctors[id].release(); // Signal to nurse that doctor is ready
       OfficeContext.safeAcquire(context.doctorsWaitingForPatient[id]); // Wait for patient
       int assignedPatient = context.assignedPatient[id];
       System.out.println("Doctor " + id + " listens to symptoms from patient " + assignedPatient);
       context.doctorFinished[id].release(); // Signal to patient that doctor is done
       OfficeContext.safeAcquire(context.patientHasLeft[id]); // Wait for patient to leave
-      context.doctorTracker.decrementRemaining();
     }
   }
 }
@@ -288,6 +297,7 @@ class Nurse extends OfficePerson implements Runnable {
 
   public void run() {
     while (!context.nurseTracker.attemptToQuit()) {
+      context.readyNurses[id].release(); // Signal to doctor that nurse is ready
       OfficeContext.safeAcquire(context.readyDoctors[id]); // Wait for doctor to be ready
       Patient p = context.nurseQueue.waitAndDequeue();
       OfficeContext.safeAcquire(context.patientsReadyForNurse[p.id]); // Wait for patient to be ready
@@ -297,6 +307,9 @@ class Nurse extends OfficePerson implements Runnable {
       context.nurseQueue.signalProcessed(p);
       context.nurseTracker.decrementRemaining();
     }
+
+    context.quitNurses[id] = true; // Safe because each index is only written once
+    context.readyNurses[id].release();
   }
 }
 

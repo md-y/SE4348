@@ -12,7 +12,7 @@ There are also a few helper classes that help manage semaphore operations, such 
 
 Queues are implemented using the `OfficeQueue` class. This class has a mutex value that protects a linked list queue. Whenever an item is enqueued, a counting semaphore representing the number of unprocessed items in the queue is incremented. This lets consumers run when there are new items in the queue. There is also an array of semaphores that allow producers to wait until their produced item is processed. This is useful for, as an example, when a patient enters the check in queue and needs to know when they can sit back down.
 
-Finally, there is a `RemainingItemsTracker` class that is used by the doctor and nurse threads to know when to exit. Unlike the receptionist thread that knows it will see every patient, some doctor/nurse threads will see differing number of patients. This class allows them to keep track of how many more patients they could see, and if the remaining number is less than the number of threads, they know they can exit. This is implemented via a pair of integers with a corresponding mutex semaphore. One integer represents the number of threads still working, and the other is the number of items remaining.
+Finally, there is a `RemainingItemsTracker` class that is used by the nurse threads (and doctors) to know when to exit. Unlike the receptionist thread that knows it will see every patient, some doctor/nurse threads will see differing number of patients. This class allows them to keep track of how many more patients they could see, and if the remaining number is less than the number of threads, they know they can exit. This is implemented via a pair of integers with a corresponding mutex semaphore. One integer represents the number of threads still working, and the other is the number of items remaining.
 
 For brevity and simplicity, the following semaphore list and pseudocode mostly ignore these implementation definitions and instead focus on core logic. However, everything from these classes is still included.
 
@@ -63,11 +63,14 @@ This is for the nurse tracker (part of `RemainingItemsTracker` in code):
 nurseTracker.remaining = 1
 ```
 
-There is one more semaphore array needed for the nurse to wait on a specific patient to return to the waiting room before being led off. Without this, the nurse could lead away a patient, and then the patient says they enter the waiting room.
+There are two more semaphore arrays needed. One is for the nurse to wait on a specific patient to return to the waiting room before being led off. Without this, the nurse could lead away a patient, and then the patient says they enter the waiting room. The other is to signal to the doctor that the nurse is ready.
 
 ```java
 // Binary semaphores used to signal nurses that a patient is ready to be led
 patientsWaitingForNurse = "all 0s array of size patient_count"
+
+// Binary semaphores used to signal doctors that the nurse is ready
+readyNurses = "all 0s array of size doctor_count"
 ```
 
 #### Doctor Semaphores
@@ -88,20 +91,13 @@ doctorFinished = "all 0s array of size doctor_count"
 patientHasLeft = "all 0s array of size doctor_count"
 ```
 
-Just like nurses, doctor threads need to know when to quit. These are for the doctor tracker (part of `RemainingItemsTracker` in code):
-
-```java
-// Mutex for remaining items and worker count tuple
-doctorTracker.remaining = 1
-```
-
 ## Pseudocode
 
 The following pseudocode represent a more functional version of the OOP implementation to reflect the format of the textbook (as per the project requirements). All core logic is the same, and it follows the real implementation closely.
 
 #### Main (Entry)
 
-The main function is simply in charge of checking the arguments, creating the global state, and handling the threads. 
+The main function is simply in charge of checking the arguments, creating the global state, and handling the threads.
 
 ```text
 main(args) {
@@ -192,7 +188,7 @@ Since there is only one receptionist, this function uses a for loop based on the
 run() {
   for each patient {
     wait(receptionistQueue.waitingSize)
-    
+
     wait(receptionistQueue.queue)
     patient = dequeue(receptionistQueue)
     signal(receptionistQueue.queue)
@@ -215,13 +211,14 @@ Nurses make use of a `tryToQuit` function that uses a pair of integers and an as
 
 ```
 nurseTracker = [remainingPatients, remainingNurses]
+quitNurses = new bool[doctor_count]
 
 tryToQuit() {
   canQuit = false
 
   // Remaining is the mutex for nurseTracker
   wait(nurseTracker.remaining)
-  
+
   if remainingNurses > remainingPatients {
     remainingNurses--
     canQuit = true
@@ -232,6 +229,7 @@ tryToQuit() {
 
 run() {
   while tryToQuit() is false {
+    signal(readyNurses[id])
     wait(readyDoctors[id])
 
     wait(nurseQueue.waitingSize)
@@ -257,25 +255,21 @@ run() {
     remainingPatients--
     signal(nurseTracker.remaining)
   }
+
+  quitNurses[id] = true
+  signal(readyNurses[id])
 }
 ```
 
 #### Doctor Code
 
-Like nurses, doctors also have an `tryToQuit` function.
+Doctors rely on their nurse quitting before they do.
 
 ```
-doctorTracker = [remainingPatients, remainingDoctors]
 
 tryToQuit() {
-  canQuit = false
-  wait(doctorTracker.remaining)
-  if remainingDoctors > remainingPatients {
-    remainingDoctors--
-    canQuit = true
-  }
-  signal(dockerTracker.remaining)
-  return canQuit
+  wait(readyNurses[id])
+  return quitNurses[id]
 }
 
 run() {
