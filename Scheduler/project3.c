@@ -12,6 +12,10 @@ int read_jobs(char *path, struct Job *jobs, unsigned int *job_count);
 void fcfs(struct Job *jobs, unsigned int count);
 void round_robin(struct Job *jobs, unsigned int count);
 
+/**
+ * Main function. Only orchestrates reading jobs, calling the scheduling, and
+ * printing errors.
+ */
 int main(int argc, char *argv[]) {
   if (argc < 2) {
     printf("Usage: %s <job-file>\n", argv[0]);
@@ -22,6 +26,7 @@ int main(int argc, char *argv[]) {
   struct Job jobs[MAX_JOBS];
   unsigned int job_count = 0;
   if ((err_code = read_jobs(argv[1], jobs, &job_count)) != 0) {
+    // Print messages outside of read_jobs since it should only return the code
     switch (err_code) {
     case -1:
       printf("Failed to open file: %s\n", argv[1]);
@@ -49,8 +54,9 @@ int main(int argc, char *argv[]) {
 }
 
 /**
- * Read jobs from a file and store them in an array and the count.
- * Returns 0 for success, -1 if the file fails to open, -2 for invalid format.
+ * Read jobs from a file and store them in an array along with the count.
+ * Returns 0 for success, -1 if the file fails to open, -2 for invalid format,
+ * or -3 for invalid arrival time sequence.
  */
 int read_jobs(char *path, struct Job *jobs, unsigned int *job_count) {
   FILE *job_file = fopen(path, "r");
@@ -58,7 +64,8 @@ int read_jobs(char *path, struct Job *jobs, unsigned int *job_count) {
     return -1; // Failed to open file
   }
 
-  for (int i = 0;; i++) {
+  // Read each line, but stop at MAX_JOBS to prevent overflow
+  for (int i = 0; i < MAX_JOBS; i++) {
     struct Job new_job;
     int res = fscanf(job_file, "%c%*[\t ]%u%*[\t ]%u%*[\n]", &new_job.name,
                      &new_job.arrival_time, &new_job.duration);
