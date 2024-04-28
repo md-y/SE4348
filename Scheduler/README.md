@@ -6,7 +6,6 @@ To compile and run on **cs1.utdallas.edu**:
 
 ```bash
 export LD_LIBRARY_PATH=/usr/local/gcc1302/lib64
-/usr/local/gcc1302/bin/g++ -L/usr/local/gcc1302/lib64 -o project3 project3.cpp
 /usr/local/gcc1302/bin/gcc -L/usr/local/gcc1302/lib64 -o project3 project3.c
 ./project3 jobs.txt
 ```
