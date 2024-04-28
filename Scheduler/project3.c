@@ -19,11 +19,20 @@ int main(int argc, char *argv[]) {
   }
 
   int err_code;
-
   struct Job jobs[MAX_JOBS];
   unsigned int job_count = 0;
   if ((err_code = read_jobs(argv[1], jobs, &job_count)) != 0) {
-    printf("Error reading job file \"%s\". Code: %d\n", argv[1], err_code);
+    switch (err_code) {
+    case -1:
+      printf("Failed to open file: %s\n", argv[1]);
+      break;
+    case -2:
+      printf("Invalid job file format.\n");
+      break;
+    case -3:
+      printf("Invalid arrival time (each job needs to be after the next).\n");
+      break;
+    }
     return err_code;
   }
 
@@ -68,7 +77,7 @@ int read_jobs(char *path, struct Job *jobs, unsigned int *job_count) {
       // Job arrival order must be in increasing order
       if (new_job.arrival_time < last_job.arrival_time) {
         fclose(job_file);
-        return -2; // Invalid format
+        return -3; // Invalid arrival time
       }
     }
 
