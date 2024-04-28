@@ -27,3 +27,11 @@ The `RR` function uses the same printing method as `FCFS`.
 ## Challenges
 
 Most of the project was implemented smoothly except `RR`. This was because I initially added new jobs after re-queued jobs instead of before, so I kept getting the wrong output. However, when I fixed this, I kept getting segmentation faults. This is because the queue starts with the first job already added, but I forgot to increment the rear index. Then whenever the queue was used after being dequeued, it would use a random integer value stored in an unused queue index with the job array, causing a random memory address to be accessed. After I fixed this, the implementation worked perfectly, but it did remind me of why using C can be challenging.
+
+## Lessons Learned
+
+The most interesting thing I learned was how to implement queues in C. I already knew the theory behind making queues using arrays, but this was the first time I actually did it so it was very enlightening.
+
+Of course, I also learned how `FCFS` and `RR` scheduling work.
+
+Overall, I am proud of the end result, and I think it works wonderfully.
