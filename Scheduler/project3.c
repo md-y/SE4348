@@ -110,12 +110,20 @@ void fcfs(struct Job *jobs, unsigned int count) {
 
   // According to the requirements, the jobs are already sorted by arrival time
   // So we can just iterate through the jobs and print the details
-  for (int job_idx = 0; job_idx < count; job_idx++) {
+  for (int job_idx = 0, time = 0; job_idx < count; job_idx++) {
     struct Job job = jobs[job_idx];
+
+    // Print empty spaces if there is a gap between jobs
+    for (; time < job.arrival_time; time++) {
+      printf("\n");
+    }
+
     for (int x_idx = 0; x_idx < job.duration; x_idx++) {
       // Pad X with spaces based on the job index
       printf("%*sX\n", job_idx, "");
     }
+
+    time += job.duration;
   }
 }
 
@@ -139,6 +147,13 @@ void round_robin(struct Job *jobs, unsigned int count) {
   for (int i = 0; i < count; i++) {
     durations[i] = jobs[i].duration;
     total_duration += jobs[i].duration;
+    if (i > 0) {
+      int gap = jobs[i].arrival_time -
+                (jobs[i - 1].arrival_time + jobs[i - 1].duration);
+      if (gap > 0) {
+        total_duration += gap;
+      }
+    }
   }
 
   // Job index 0 is guaranteed to be running first
@@ -148,12 +163,18 @@ void round_robin(struct Job *jobs, unsigned int count) {
   queue[0] = 0;
 
   for (int i = 0; i < total_duration; i++) {
-    // Dequeue job
-    int job_idx = queue[front];
-    front = (front + 1) % count;
+    int job_idx = -1;
 
-    durations[job_idx]--;
-    printf("%*sX\n", job_idx, "");
+    // Dequeue job if it exists
+    if (front != rear) {
+      job_idx = queue[front];
+      front = (front + 1) % count;
+
+      durations[job_idx]--;
+      printf("%*sX\n", job_idx, "");
+    } else {
+      printf("\n");
+    }
 
     // Enqueue next job if it arrives next
     if (next_job < count && jobs[next_job].arrival_time == i + 1) {
@@ -163,7 +184,7 @@ void round_robin(struct Job *jobs, unsigned int count) {
     }
 
     // Re-enqueue job
-    if (durations[job_idx] > 0) {
+    if (job_idx >= 0 && durations[job_idx] > 0) {
       queue[rear] = job_idx;
       rear = (rear + 1) % count;
     }
